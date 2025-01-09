@@ -20,7 +20,7 @@
                         },
                         "runOrder": 1,
                         "configuration": {
-                            "BranchName": "master",
+                            "BranchName": "main",
                             "ConnectionArn": "arn:aws:codeconnections:us-east-1:558846430793:connection/7be9bf29-5044-4420-b68a-74dee654c092",
                             "DetectChanges": "false",
                             "FullRepositoryId": "byoungsoo/eks-management",
