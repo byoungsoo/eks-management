@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  AWSAccount:
+    Type: "String"
+    Description: "AWSAccount"
+    Default: "558846430793"
+  Alias:
+    Type: "String"
+    Description: "AlarmEmail"
+    Default: ""
+  ExcludeEKSClusters:
+    Type: 'String'
+    Description: "Comma-separated values, cluster name want to be exclude. Ex. test-cluster1,test-cluster2"
+    Default: ""
+  EKSManagerAddonUpgradeAlarmName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeAlarm"
+  EKSManagerAddonUpgradeSNSTopicName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeSNSTopic"
+  EKSManagerAddonUpgradeLambdaName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeLambda"
+  EKSManagerAddonUpgradeLambdaAliasName:
+    Type: "String"
+    Default: "AddonUpgrade"
+  EKSManagerAddonUpgradeLambdaRoleName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeLambdaRole"
+  EKSManagerPolicyName:
+    Type: "String"
+    Default: "EKSManagerEKSFullAccessPolicy"
+  EKSManagerAddonUpgradeSchedulerName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeScheduler"
+  EKSManagerAddonUpgradeSchedulerRoleName:
+    Type: "String"
+    Default: "EKSManagerAddonUpgradeSchedulerRole"
+  SchedulerCron:
+    Type: "String"
+    Default: "cron(0 7 * * ? *)"
+  SchedulerTimezone:
+    Type: "String"
+    Default: "Asia/Seoul"
+  CodeS3Bucket:
+    Type: "String"
+    Description: "S3 Bucket Name including zip code."
+    Default: "bys-dev-ap2-s3-eks-manager"
+  CodeS3Key:
+    Type: "String"
+    Description: "Code file name including specific path, ex. /specific/path/eks_addon_manager.zip"
+    Default: "addon/eks_addon_manager.zip"
+
+Resources:
+## Lambda
+  EKSAddonUpgradeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Ref: EKSManagerAddonUpgradeLambdaName
+#      Architectures: x86_64
+      Role: {"Fn::GetAtt" : ["EKSAddonUpgradeLambdaIAMRole", Arn] }
+      Code:
+        S3Bucket:
+          Ref: CodeS3Bucket
+        S3Key:
+          Ref: CodeS3Key
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Timeout: 600
+      Environment:
+        Variables:
+          ExcludeEKSClusters:
+            Ref: ExcludeEKSClusters
+      Tags:
+        - Key: "auto-delete"
+          Value: "no"
+  EKSAddonUpgradeLambdaVersion:
+    Type: AWS::Lambda::Version
+    DependsOn: EKSAddonUpgradeLambda
+    Properties:
+      FunctionName:
+        Ref: EKSManagerAddonUpgradeLambdaName
+  EKSAddonUpgradeLambdaAlias:
+    Type: AWS::Lambda::Alias
+    DependsOn: EKSAddonUpgradeLambda
+    Properties:
+      Description: "EKSManager - Addon Upgrade"
+      Name:
+        Ref: EKSManagerAddonUpgradeLambdaAliasName
+      FunctionName:
+        Ref: EKSManagerAddonUpgradeLambdaName
+      FunctionVersion:
+        {"Fn::GetAtt" : ["EKSAddonUpgradeLambdaVersion", Version] }
+  ## Scheduler
+  EKSAddonUpgradeLambdaScheduler:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name:
+        Ref: EKSManagerAddonUpgradeSchedulerName
+      ScheduleExpression:
+        Ref: SchedulerCron
+      ScheduleExpressionTimezone:
+        Ref: SchedulerTimezone
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 5
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: {"Fn::GetAtt" : ["EKSAddonUpgradeLambda", Arn] }
+        RoleArn: {"Fn::GetAtt" : ["SchedulerIAMRole", Arn] }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 86400
+          MaximumRetryAttempts: 3
+## AlarmSNS
+  LambdaInvokeAlarmSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            !Join [ "@", [ Ref: 'Alias', 'amazon.com' ] ]
+          Protocol: "email"
+      TopicName:
+        Ref: EKSManagerAddonUpgradeSNSTopicName
+      Tags:
+        - Key: "auto-delete"
+          Value: "no"
+## InvocationsAlarm
+  EKSAddonUpgradeLambdaInvokeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Ref: EKSManagerAddonUpgradeAlarmName
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: "FunctionName"
+          Value:
+            Ref: EKSManagerAddonUpgradeLambdaName
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      Period: 300
+      Statistic: Sum
+      TreatMissingData: missing
+      AlarmActions:
+        - {"Fn::GetAtt" : ["LambdaInvokeAlarmSNS", TopicArn] }
+## IAM
+  EKSAddonUpgradeLambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AutoScalingFullAccess
+        - Fn::GetAtt: [ 'EKSManagerEKSFullAccessPolicy', PolicyArn ]
+      RoleName:
+        Ref: EKSManagerAddonUpgradeLambdaRoleName
+  EKSManagerEKSFullAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName:
+        Ref: EKSManagerPolicyName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'eks:*'
+            Resource: '*'
+  SchedulerIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - scheduler.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeSchedulerExecutionPolicy-EKSManagerAddonUpgrade
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !Sub 'arn:aws:lambda:ap-northeast-2:${AWSAccount}:function:*'
+      RoleName:
+        Ref: EKSManagerAddonUpgradeSchedulerRoleName
